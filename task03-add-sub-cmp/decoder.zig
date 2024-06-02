@@ -110,7 +110,7 @@ pub fn main() !void {
             try state.out.print("add {s}, {d}\n", .{ reg, val });
         } else if ((firstb & 0xF0) == 0xB0) {
             // MOV Immediate to register.
-            const wide = (firstb & 1) == 1;
+            const wide = (firstb & 8) == 8;
             const dest_reg = chooseReg(firstb & 7, wide);
             var val: i16 = undefined;
             if (wide) {
