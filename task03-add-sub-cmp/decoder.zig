@@ -30,9 +30,10 @@ const EAMode = struct {
     disp16: u16 = 0,
     reg_only: bool = false,
     is_word: bool = false,
+    direct_address: bool = false,
 };
 
-const Opcode = enum { MOV, ADD, SUB };
+const Opcode = enum { MOV, ADD, SUB, CMP };
 
 const DecoderState = struct {
     bytes: []u8,
@@ -68,12 +69,17 @@ pub fn main() !void {
         } else if ((firstb & 0xFC) == 0x28) {
             // SUB Reg/memory with register to either.
             try decodeRegMemInstruction(Opcode.SUB, &state);
+        } else if ((firstb & 0xFC) == 0b00111000) {
+            // CMP Reg/memory with register to either.
+            try decodeRegMemInstruction(Opcode.CMP, &state);
         } else if ((firstb & 0xFC) == 0x80) {
             try decodeArithmeticImmediate(&state);
         } else if ((firstb & 0xFC) == 4) {
             try decodeArithmeticImmediateToAccum(Opcode.ADD, &state);
         } else if ((firstb & 0xFC) == 0b00101100) {
             try decodeArithmeticImmediateToAccum(Opcode.SUB, &state);
+        } else if ((firstb & 0xFC) == 0b00111100) {
+            try decodeArithmeticImmediateToAccum(Opcode.CMP, &state);
         } else if ((firstb & 0xF0) == 0xB0) {
             // MOV Immediate to register.
             const wide = (firstb & 8) == 8;
@@ -142,7 +148,7 @@ fn decodeArithmeticImmediate(state: *DecoderState) !void {
 
     const op_part = (secondb & 0x38) >> 3;
     const opcode =
-        if (op_part == 0b101) Opcode.SUB else Opcode.ADD;
+        if (op_part == 0b101) Opcode.SUB else if (op_part == 0b111) Opcode.CMP else Opcode.ADD;
 
     try state.out.print("{s} {s}, {d}\n", .{ opcodeToString(opcode), eaModeToString(eaMode, &state.strbuf, !eaMode.reg_only), val });
 }
@@ -183,6 +189,7 @@ fn opcodeToString(opcode: Opcode) []const u8 {
         Opcode.MOV => "mov",
         Opcode.ADD => "add",
         Opcode.SUB => "sub",
+        Opcode.CMP => "cmp",
     };
 }
 
@@ -251,7 +258,13 @@ fn eaModeToString(mode: EAMode, buf: []u8, specify_width: bool) []u8 {
     else
         "byte ";
 
-    if (mode.is_disp8) {
+    if (mode.direct_address) {
+        if (mode.is_disp16) {
+            return simplyBufPrint(buf, "{s}[{d}]", .{ width_specifier, mode.disp16 });
+        } else {
+            return simplyBufPrint(buf, "{s}[{d}]", .{ width_specifier, mode.disp8 });
+        }
+    } else if (mode.is_disp8) {
         if (mode.reg2) |reg2| {
             return simplyBufPrint(buf, "{s}[{s} + {s} + {d}]", .{ width_specifier, regToString(mode.reg1), regToString(reg2), mode.disp8 });
         } else {
@@ -284,7 +297,7 @@ fn getEAMode(rm: u8, mod: u8, wide: bool) EAMode {
             3 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.DI },
             4 => EAMode{ .reg1 = Reg.SI },
             5 => EAMode{ .reg1 = Reg.DI },
-            6 => EAMode{ .reg1 = Reg.DI }, // TODO: direct address
+            6 => EAMode{ .direct_address = true, .is_disp16 = wide, .is_disp8 = !wide },
             7 => EAMode{ .reg1 = Reg.BX },
             else => @panic("Wrong rm for mod == 0"),
         };
