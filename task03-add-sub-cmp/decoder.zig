@@ -21,18 +21,18 @@ const Reg = enum {
     DH,
 };
 
-const EAMode = struct { 
-    reg1: Reg = Reg.AX, 
-    reg2: ?Reg = null, 
-    is_disp8: bool = false, 
-    disp8: u8 = 0, 
-    is_disp16: bool = false, 
-    disp16: u16 = 0, 
-    reg_only: bool = false, 
-    is_word: bool = false 
+const EAMode = struct {
+    reg1: Reg = Reg.AX, // This should be available
+    reg2: ?Reg = null,
+    is_disp8: bool = false,
+    disp8: u8 = 0,
+    is_disp16: bool = false,
+    disp16: u16 = 0,
+    reg_only: bool = false,
+    is_word: bool = false,
 };
 
-const Opcode = enum { MOV, ADD };
+const Opcode = enum { MOV, ADD, SUB };
 
 const DecoderState = struct {
     bytes: []u8,
@@ -61,53 +61,19 @@ pub fn main() !void {
     while (state.i < state.bytes.len) {
         const firstb = state.bytes[state.i];
         if ((firstb & 0xFC) == 0x88) {
-            try printRegMemInstruction(Opcode.MOV, &state);
+            try decodeRegMemInstruction(Opcode.MOV, &state);
         } else if ((firstb & 0xFC) == 0) {
             // ADD Reg/memory with register to either.
-            try printRegMemInstruction(Opcode.ADD, &state);
+            try decodeRegMemInstruction(Opcode.ADD, &state);
+        } else if ((firstb & 0xFC) == 0x28) {
+            // SUB Reg/memory with register to either.
+            try decodeRegMemInstruction(Opcode.SUB, &state);
         } else if ((firstb & 0xFC) == 0x80) {
-            // ADD Immediate to register/memory.
-            const secondb = state.bytes[state.i + 1];
-            const s = (firstb & 2) == 2;
-            const wide = (firstb & 1) == 1;
-            const mod = (secondb >> 6) & 3;
-            const rm = secondb & 7;
-            var eaMode = getEAMode(rm, mod, wide);
-            if (eaMode.is_disp8) {
-                eaMode.disp8 = state.bytes[state.i + 2];
-                state.i += 3;
-            } else if (eaMode.is_disp16) {
-                eaMode.disp16 = (@as(u16, state.bytes[state.i + 3]) << 8) | state.bytes[state.i + 2];
-                state.i += 4;
-            } else {
-                state.i += 2;
-            }
-
-            var val: i16 = undefined;
-            if (!s and wide) {
-                val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
-                state.i += 2;
-            } else {
-                val = state.bytes[state.i];
-                state.i += 1;
-            }
-
-            try state.out.print("add {s}, {d}\n", .{ eaModeToString(eaMode, &state.strbuf, !eaMode.reg_only), val });
+            try decodeArithmeticImmediate(&state);
         } else if ((firstb & 0xFC) == 4) {
-            // ADD Immediate to accumulator.
-            const wide = (firstb & 1) == 1;
-            var val: i16 = undefined;
-            var reg: []const u8 = undefined;
-            if (wide) {
-                val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
-                state.i += 3;
-                reg = "ax";
-            } else {
-                val = state.bytes[state.i + 1];
-                state.i += 2;
-                reg = "al";
-            }
-            try state.out.print("add {s}, {d}\n", .{ reg, val });
+            try decodeArithmeticImmediateToAccum(Opcode.ADD, &state);
+        } else if ((firstb & 0xFC) == 0b00101100) {
+            try decodeArithmeticImmediateToAccum(Opcode.SUB, &state);
         } else if ((firstb & 0xF0) == 0xB0) {
             // MOV Immediate to register.
             const wide = (firstb & 8) == 8;
@@ -128,7 +94,60 @@ pub fn main() !void {
     }
 }
 
-fn printRegMemInstruction(opcode: Opcode, state: *DecoderState) !void {
+fn decodeArithmeticImmediateToAccum(opcode: Opcode, state: *DecoderState) !void {
+    // ADD/SUB/... Immediate to accumulator.
+    const firstb = state.bytes[state.i];
+    const wide = (firstb & 1) == 1;
+    var val: i16 = undefined;
+    var reg: []const u8 = undefined;
+    if (wide) {
+        val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
+        state.i += 3;
+        reg = "ax";
+    } else {
+        val = state.bytes[state.i + 1];
+        state.i += 2;
+        reg = "al";
+    }
+    try state.out.print("{s} {s}, {d}\n", .{ opcodeToString(opcode), reg, val });
+}
+
+fn decodeArithmeticImmediate(state: *DecoderState) !void {
+    // ADD/SUB/... Immediate to register/memory.
+    const firstb = state.bytes[state.i];
+    const secondb = state.bytes[state.i + 1];
+    const s = (firstb & 2) == 2;
+    const wide = (firstb & 1) == 1;
+    const mod = (secondb >> 6) & 3;
+    const rm = secondb & 7;
+    var eaMode = getEAMode(rm, mod, wide);
+    if (eaMode.is_disp8) {
+        eaMode.disp8 = state.bytes[state.i + 2];
+        state.i += 3;
+    } else if (eaMode.is_disp16) {
+        eaMode.disp16 = (@as(u16, state.bytes[state.i + 3]) << 8) | state.bytes[state.i + 2];
+        state.i += 4;
+    } else {
+        state.i += 2;
+    }
+
+    var val: i16 = undefined;
+    if (!s and wide) {
+        val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
+        state.i += 2;
+    } else {
+        val = state.bytes[state.i];
+        state.i += 1;
+    }
+
+    const op_part = (secondb & 0x38) >> 3;
+    const opcode =
+        if (op_part == 0b101) Opcode.SUB else Opcode.ADD;
+
+    try state.out.print("{s} {s}, {d}\n", .{ opcodeToString(opcode), eaModeToString(eaMode, &state.strbuf, !eaMode.reg_only), val });
+}
+
+fn decodeRegMemInstruction(opcode: Opcode, state: *DecoderState) !void {
     const firstb = state.bytes[state.i];
     const secondb = state.bytes[state.i + 1];
     const wide = (firstb & 1) == 1;
@@ -163,6 +182,7 @@ fn opcodeToString(opcode: Opcode) []const u8 {
     return switch (opcode) {
         Opcode.MOV => "mov",
         Opcode.ADD => "add",
+        Opcode.SUB => "sub",
     };
 }
 
