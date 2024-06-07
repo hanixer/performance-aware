@@ -33,7 +33,65 @@ const EAMode = struct {
     direct_address: bool = false,
 };
 
-const Opcode = enum { MOV, ADD, SUB, CMP };
+const Opcode = enum {
+    MOV,
+    ADD,
+    SUB,
+    CMP,
+    JA,
+    JB,
+    JBE,
+    JCXZ,
+    JE,
+    JG,
+    JL,
+    JLE,
+    JNB,
+    JNE,
+    JNL,
+    JNO,
+    JNP,
+    JNS,
+    JO,
+    JP,
+    JS,
+    JZ,
+    JNZ,
+    LOOP,
+    LOOPNZ,
+    LOOPZ,
+};
+
+fn opcodeToString(opcode: Opcode) []const u8 {
+    return switch (opcode) {
+        Opcode.MOV => "mov",
+        Opcode.ADD => "add",
+        Opcode.SUB => "sub",
+        Opcode.CMP => "cmp",
+        Opcode.JA => "ja",
+        Opcode.JB => "jb",
+        Opcode.JBE => "jbe",
+        Opcode.JCXZ => "jcxz",
+        Opcode.JE => "je",
+        Opcode.JG => "jg",
+        Opcode.JL => "jl",
+        Opcode.JLE => "jle",
+        Opcode.JNB => "jnb",
+        Opcode.JNE => "jne",
+        Opcode.JNL => "jnl",
+        Opcode.JNO => "jno",
+        Opcode.JNP => "jnp",
+        Opcode.JNS => "jns",
+        Opcode.JO => "jo",
+        Opcode.JP => "jp",
+        Opcode.JS => "js",
+        Opcode.JZ => "jz",
+        Opcode.JNZ => "jnz",
+        Opcode.LOOP => "loop",
+        Opcode.LOOPNZ => "loopnz",
+        Opcode.LOOPZ => "loopz",
+    };
+}
 
 const DecoderState = struct {
     bytes: []u8,
@@ -93,11 +151,59 @@ pub fn main() !void {
                 state.i += 2;
             }
             try stdout.print("mov {s}, {d}\n", .{ regToString(dest_reg), val });
+        } else if (firstb == 0x70) {
+            try decodeJump(Opcode.JO, &state);
+        } else if (firstb == 0x71) {
+            try decodeJump(Opcode.JNO, &state);
+        } else if (firstb == 0x72) {
+            try decodeJump(Opcode.JB, &state);
+        } else if (firstb == 0x73) {
+            try decodeJump(Opcode.JNB, &state);
+        } else if (firstb == 0x74) {
+            try decodeJump(Opcode.JZ, &state);
+        } else if (firstb == 0x75) {
+            try decodeJump(Opcode.JNZ, &state);
+        } else if (firstb == 0x76) {
+            try decodeJump(Opcode.JBE, &state);
+        } else if (firstb == 0x77) {
+            try decodeJump(Opcode.JA, &state);
+        } else if (firstb == 0x78) {
+            try decodeJump(Opcode.JS, &state);
+        } else if (firstb == 0x79) {
+            try decodeJump(Opcode.JNS, &state);
+        } else if (firstb == 0x7A) {
+            try decodeJump(Opcode.JP, &state);
+        } else if (firstb == 0x7B) {
+            try decodeJump(Opcode.JNP, &state);
+        } else if (firstb == 0x7C) {
+            try decodeJump(Opcode.JL, &state);
+        } else if (firstb == 0x7D) {
+            try decodeJump(Opcode.JNL, &state);
+        } else if (firstb == 0x7E) {
+            try decodeJump(Opcode.JLE, &state);
+        } else if (firstb == 0x7F) {
+            try decodeJump(Opcode.JG, &state);
+        } else if (firstb == 0xE0) {
+            try decodeJump(Opcode.LOOPNZ, &state);
+        } else if (firstb == 0xE1) {
+            try decodeJump(Opcode.LOOPZ, &state);
+        } else if (firstb == 0xE2) {
+            try decodeJump(Opcode.LOOP, &state);
+        } else if (firstb == 0xE3) {
+            try decodeJump(Opcode.JCXZ, &state);
         } else {
             std.debug.print("first byte {b} index {d}\n\n", .{ firstb, state.i });
             @panic("Not implemented... Oh no... ohnooo, oh no no no no no...");
         }
     }
+}
+
+fn decodeJump(opcode: Opcode, state: *DecoderState) !void {
+    const realval = state.bytes[state.i + 1];
+    var ipinc: i8 = @bitCast(realval);
+    ipinc += 2;
+    state.i += 2;
+    try state.out.print("{s} ${s}{d}\n", .{ opcodeToString(opcode), if (ipinc >= 0) "+" else "", ipinc });
 }
 
 fn decodeArithmeticImmediateToAccum(opcode: Opcode, state: *DecoderState) !void {
@@ -182,15 +288,6 @@ fn decodeRegMemInstruction(opcode: Opcode, state: *DecoderState) !void {
     } else {
         try state.out.print("{s} {s}, {s}\n", .{ opcodeToString(opcode), regToString(reg), eaModeToString(eaMode, &state.strbuf, false) });
     }
-}
-
-fn opcodeToString(opcode: Opcode) []const u8 {
-    return switch (opcode) {
-        Opcode.MOV => "mov",
-        Opcode.ADD => "add",
-        Opcode.SUB => "sub",
-        Opcode.CMP => "cmp",
-    };
 }
 
 fn chooseReg(v: u8, wide: bool) Reg {
