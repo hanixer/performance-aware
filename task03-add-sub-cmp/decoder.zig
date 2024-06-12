@@ -21,18 +21,6 @@ const Reg = enum {
     DH,
 };
 
-const EAMode = struct {
-    reg1: Reg = Reg.AX, // This should be available
-    reg2: ?Reg = null,
-    is_disp8: bool = false,
-    disp8: u8 = 0,
-    is_disp16: bool = false,
-    disp16: u16 = 0,
-    reg_only: bool = false,
-    is_word: bool = false,
-    direct_address: bool = false,
-};
-
 const Opcode = enum {
     MOV,
     ADD,
@@ -62,43 +50,92 @@ const Opcode = enum {
     LOOPZ,
 };
 
-fn opcodeToString(opcode: Opcode) []const u8 {
-    return switch (opcode) {
-        Opcode.MOV => "mov",
-        Opcode.ADD => "add",
-        Opcode.SUB => "sub",
-        Opcode.CMP => "cmp",
-        Opcode.JA => "ja",
-        Opcode.JB => "jb",
-        Opcode.JBE => "jbe",
-        Opcode.JCXZ => "jcxz",
-        Opcode.JE => "je",
-        Opcode.JG => "jg",
-        Opcode.JL => "jl",
-        Opcode.JLE => "jle",
-        Opcode.JNB => "jnb",
-        Opcode.JNE => "jne",
-        Opcode.JNL => "jnl",
-        Opcode.JNO => "jno",
-        Opcode.JNP => "jnp",
-        Opcode.JNS => "jns",
-        Opcode.JO => "jo",
-        Opcode.JP => "jp",
-        Opcode.JS => "js",
-        Opcode.JZ => "jz",
-        Opcode.JNZ => "jnz",
-        Opcode.LOOP => "loop",
-        Opcode.LOOPNZ => "loopnz",
-        Opcode.LOOPZ => "loopz",
-    };
-}
-
 const DecoderState = struct {
     bytes: []u8,
     i: usize,
     strbuf: [128]u8 = undefined,
     out: std.fs.File.Writer,
 };
+
+const RegMemory = struct {
+    reg1: Reg = Reg.AX, // This should be always available
+    reg2: ?Reg = null,
+    is_disp8: bool = false,
+    is_disp16: bool = false,
+    disp: u16 = 0,
+    reg_only: bool = false,
+    is_word: bool = false,
+    direct_address: bool = false,
+};
+
+const OperandsMode = enum {
+    RegMemoryAndReg,
+    ImmediateToRegMemory,
+    IpIncrement,
+};
+
+const Instruction = struct {
+    opcode: Opcode = Opcode.ADD,
+    reg: Reg = Reg.AH,
+    reg_memory: RegMemory = .{},
+    immediate: u16 = 0,
+    ip_increment: i8 = 0,
+    destination_in_reg: bool = false,
+    operands_mode: OperandsMode = OperandsMode.ImmediateToRegMemory,
+};
+
+fn printRegMemory(reg_memory: RegMemory, writer: std.fs.File.Writer, specify_width: bool) !void {
+    const width_specifier: []const u8 = if (!specify_width)
+        ""
+    else if (reg_memory.is_word)
+        "word "
+    else
+        "byte ";
+
+    if (reg_memory.direct_address) {
+        try writer.print("{s}[{d}]", .{ width_specifier, reg_memory.disp });
+    } else if (reg_memory.is_disp8 or reg_memory.is_disp16) {
+        if (reg_memory.reg2) |reg2| {
+            try writer.print("{s}[{s} + {s} + {d}]", .{ width_specifier, regToString(reg_memory.reg1), regToString(reg2), reg_memory.disp });
+        } else {
+            try writer.print("{s}[{s} + {d}]", .{ width_specifier, regToString(reg_memory.reg1), reg_memory.disp });
+        }
+    } else if (reg_memory.reg2) |reg2| {
+        try writer.print("{s}[{s} + {s}]", .{ width_specifier, regToString(reg_memory.reg1), regToString(reg2) });
+    } else if (reg_memory.reg_only) {
+        try writer.print("{s}", .{regToString(reg_memory.reg1)});
+    } else {
+        try writer.print("{s}[{s}]", .{ width_specifier, regToString(reg_memory.reg1) });
+    }
+
+    // @panic("Unhandled case...");
+
+}
+
+fn printInstruction(instruction: Instruction, writer: std.fs.File.Writer) !void {
+    try writer.print("{s} ", .{opcodeToString(instruction.opcode)});
+    switch (instruction.operands_mode) {        
+        OperandsMode.IpIncrement => {
+            const sign = if (instruction.ip_increment >= 0) "+" else "";
+            try writer.print("${s}{d}", .{ sign, instruction.ip_increment });
+        },
+        OperandsMode.ImmediateToRegMemory => {
+            try printRegMemory(instruction.reg_memory, writer, !instruction.reg_memory.reg_only);
+            try writer.print(", {d}", .{instruction.immediate});
+        },
+        OperandsMode.RegMemoryAndReg => {
+            const reg_string = regToString(instruction.reg);
+            if (instruction.destination_in_reg) {
+                try writer.print("{s}, ", .{reg_string});
+                try printRegMemory(instruction.reg_memory, writer, false);
+            } else {
+                try printRegMemory(instruction.reg_memory, writer, false);
+                try writer.print(", {s}", .{reg_string});
+            }
+        },
+    }
+    try writer.print("\n", .{});
+}
 
 pub fn main() !void {
     const gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -118,176 +155,262 @@ pub fn main() !void {
     };
 
     while (state.i < state.bytes.len) {
-        const firstb = state.bytes[state.i];
-        if ((firstb & 0xFC) == 0x88) {
-            try decodeRegMemInstruction(Opcode.MOV, &state);
-        } else if ((firstb & 0xFC) == 0) {
-            // ADD Reg/memory with register to either.
-            try decodeRegMemInstruction(Opcode.ADD, &state);
-        } else if ((firstb & 0xFC) == 0x28) {
-            // SUB Reg/memory with register to either.
-            try decodeRegMemInstruction(Opcode.SUB, &state);
-        } else if ((firstb & 0xFC) == 0b00111000) {
-            // CMP Reg/memory with register to either.
-            try decodeRegMemInstruction(Opcode.CMP, &state);
-        } else if ((firstb & 0xFC) == 0x80) {
-            try decodeArithmeticImmediate(&state);
-        } else if ((firstb & 0xFC) == 4) {
-            try decodeArithmeticImmediateToAccum(Opcode.ADD, &state);
-        } else if ((firstb & 0xFC) == 0b00101100) {
-            try decodeArithmeticImmediateToAccum(Opcode.SUB, &state);
-        } else if ((firstb & 0xFC) == 0b00111100) {
-            try decodeArithmeticImmediateToAccum(Opcode.CMP, &state);
-        } else if ((firstb & 0xF0) == 0xB0) {
-            // MOV Immediate to register.
-            const wide = (firstb & 8) == 8;
-            const dest_reg = chooseReg(firstb & 7, wide);
-            var val: i16 = undefined;
-            if (wide) {
-                val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
-                state.i += 3;
-            } else {
-                val = state.bytes[state.i + 1];
-                state.i += 2;
-            }
-            try stdout.print("mov {s}, {d}\n", .{ regToString(dest_reg), val });
-        } else if (firstb == 0x70) {
-            try decodeJump(Opcode.JO, &state);
-        } else if (firstb == 0x71) {
-            try decodeJump(Opcode.JNO, &state);
-        } else if (firstb == 0x72) {
-            try decodeJump(Opcode.JB, &state);
-        } else if (firstb == 0x73) {
-            try decodeJump(Opcode.JNB, &state);
-        } else if (firstb == 0x74) {
-            try decodeJump(Opcode.JZ, &state);
-        } else if (firstb == 0x75) {
-            try decodeJump(Opcode.JNZ, &state);
-        } else if (firstb == 0x76) {
-            try decodeJump(Opcode.JBE, &state);
-        } else if (firstb == 0x77) {
-            try decodeJump(Opcode.JA, &state);
-        } else if (firstb == 0x78) {
-            try decodeJump(Opcode.JS, &state);
-        } else if (firstb == 0x79) {
-            try decodeJump(Opcode.JNS, &state);
-        } else if (firstb == 0x7A) {
-            try decodeJump(Opcode.JP, &state);
-        } else if (firstb == 0x7B) {
-            try decodeJump(Opcode.JNP, &state);
-        } else if (firstb == 0x7C) {
-            try decodeJump(Opcode.JL, &state);
-        } else if (firstb == 0x7D) {
-            try decodeJump(Opcode.JNL, &state);
-        } else if (firstb == 0x7E) {
-            try decodeJump(Opcode.JLE, &state);
-        } else if (firstb == 0x7F) {
-            try decodeJump(Opcode.JG, &state);
-        } else if (firstb == 0xE0) {
-            try decodeJump(Opcode.LOOPNZ, &state);
-        } else if (firstb == 0xE1) {
-            try decodeJump(Opcode.LOOPZ, &state);
-        } else if (firstb == 0xE2) {
-            try decodeJump(Opcode.LOOP, &state);
-        } else if (firstb == 0xE3) {
-            try decodeJump(Opcode.JCXZ, &state);
-        } else {
-            std.debug.print("first byte {b} index {d}\n\n", .{ firstb, state.i });
-            @panic("Not implemented... Oh no... ohnooo, oh no no no no no...");
-        }
+        const instruction = decodeInstruction(state.bytes, &state.i);
+        try printInstruction(instruction, stdout);
     }
 }
 
-fn decodeJump(opcode: Opcode, state: *DecoderState) !void {
-    const realval = state.bytes[state.i + 1];
-    var ipinc: i8 = @bitCast(realval);
-    ipinc += 2;
-    state.i += 2;
-    try state.out.print("{s} ${s}{d}\n", .{ opcodeToString(opcode), if (ipinc >= 0) "+" else "", ipinc });
+fn decodeInstruction(bytes: []u8, ip: *usize) Instruction {
+    const byte = bytes[ip.*];
+
+    switch (byte & 0b11111100) {
+        0b10001000 => return decodeRegMemoryAndRegInstruction(Opcode.MOV, bytes, ip),
+        0b00000000 => return decodeRegMemoryAndRegInstruction(Opcode.ADD, bytes, ip),
+        0b00101000 => return decodeRegMemoryAndRegInstruction(Opcode.SUB, bytes, ip),
+        0b00111000 => return decodeRegMemoryAndRegInstruction(Opcode.CMP, bytes, ip),
+        0b10000000 => return decodeArithmeticImmediate(bytes, ip),
+        0b00000100 => return decodeArithmeticImmediateToAccum(Opcode.ADD, bytes, ip),
+        0b00101100 => return decodeArithmeticImmediateToAccum(Opcode.SUB, bytes, ip),
+        0b00111100 => return decodeArithmeticImmediateToAccum(Opcode.CMP, bytes, ip),
+        else => {},
+    }
+
+    if ((byte & 0b11110000) == 0xB0) {
+        return decodeMovImmediateToReg(bytes, ip);
+    }
+
+    switch (byte) {
+        0x70 => return decodeJump(Opcode.JO, bytes, ip),
+        0x71 => return decodeJump(Opcode.JNO, bytes, ip),
+        0x72 => return decodeJump(Opcode.JB, bytes, ip),
+        0x73 => return decodeJump(Opcode.JNB, bytes, ip),
+        0x74 => return decodeJump(Opcode.JZ, bytes, ip),
+        0x75 => return decodeJump(Opcode.JNZ, bytes, ip),
+        0x76 => return decodeJump(Opcode.JBE, bytes, ip),
+        0x77 => return decodeJump(Opcode.JA, bytes, ip),
+        0x78 => return decodeJump(Opcode.JS, bytes, ip),
+        0x79 => return decodeJump(Opcode.JNS, bytes, ip),
+        0x7A => return decodeJump(Opcode.JP, bytes, ip),
+        0x7B => return decodeJump(Opcode.JNP, bytes, ip),
+        0x7C => return decodeJump(Opcode.JL, bytes, ip),
+        0x7D => return decodeJump(Opcode.JNL, bytes, ip),
+        0x7E => return decodeJump(Opcode.JLE, bytes, ip),
+        0x7F => return decodeJump(Opcode.JG, bytes, ip),
+        0xE0 => return decodeJump(Opcode.LOOPNZ, bytes, ip),
+        0xE1 => return decodeJump(Opcode.LOOPZ, bytes, ip),
+        0xE2 => return decodeJump(Opcode.LOOP, bytes, ip),
+        0xE3 => return decodeJump(Opcode.JCXZ, bytes, ip),
+        else => @panic("Unrecognized instruction")
+    }
+
+    @panic("Unrecognized instruction");
 }
 
-fn decodeArithmeticImmediateToAccum(opcode: Opcode, state: *DecoderState) !void {
-    // ADD/SUB/... Immediate to accumulator.
-    const firstb = state.bytes[state.i];
-    const wide = (firstb & 1) == 1;
-    var val: i16 = undefined;
-    var reg: []const u8 = undefined;
-    if (wide) {
-        val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
-        state.i += 3;
-        reg = "ax";
-    } else {
-        val = state.bytes[state.i + 1];
-        state.i += 2;
-        reg = "al";
-    }
-    try state.out.print("{s} {s}, {d}\n", .{ opcodeToString(opcode), reg, val });
+// Arithmetic reg/memory with register to either
+// MOV reg/memory and register to either
+fn decodeRegMemoryAndRegInstruction(opcode: Opcode, bytes: []u8, ip: *usize) Instruction {
+    const byte1 = bytes[ip.*];
+    const byte2 = bytes[ip.* + 1];
+    const w = (byte1 & 1) == 1;
+    const d = (byte1 & 0b10) == 0b10;
+    const mod = (byte2 >> 6) & 0b11;
+    const reg_raw = (byte2 >> 3) & 0b111;
+    const rm = byte2 & 7;
+    ip.* += 2;
+
+    const reg = chooseReg(reg_raw, w);
+    const reg_memory = getRegMemory(rm, mod, w, bytes, ip);
+
+    return Instruction{ .opcode = opcode, .reg = reg, .reg_memory = reg_memory, .destination_in_reg = d, .operands_mode = OperandsMode.RegMemoryAndReg };
 }
 
-fn decodeArithmeticImmediate(state: *DecoderState) !void {
-    // ADD/SUB/... Immediate to register/memory.
-    const firstb = state.bytes[state.i];
-    const secondb = state.bytes[state.i + 1];
-    const s = (firstb & 2) == 2;
-    const wide = (firstb & 1) == 1;
-    const mod = (secondb >> 6) & 3;
-    const rm = secondb & 7;
-    var eaMode = getEAMode(rm, mod, wide);
-    if (eaMode.is_disp8) {
-        eaMode.disp8 = state.bytes[state.i + 2];
-        state.i += 3;
-    } else if (eaMode.is_disp16) {
-        eaMode.disp16 = (@as(u16, state.bytes[state.i + 3]) << 8) | state.bytes[state.i + 2];
-        state.i += 4;
+fn decodeMovImmediateToReg(bytes: []u8, ip: *usize) Instruction {
+    const byte1 = bytes[ip.*];
+    const w = (byte1 & 8) == 8;
+    const reg = chooseReg(byte1 & 0b111, w);
+    ip.* += 1;
+
+    var immediate: u16 = undefined;
+    if (w) {
+        immediate = readU16(bytes, ip.*);
+        ip.* += 2;
     } else {
-        state.i += 2;
+        immediate = bytes[ip.*];
+        ip.* += 1;
     }
 
-    var val: i16 = undefined;
-    if (!s and wide) {
-        val = (@as(i16, state.bytes[state.i + 2]) << 8) + state.bytes[state.i + 1];
-        state.i += 2;
+    return Instruction{
+        .opcode = Opcode.MOV,
+        .immediate = immediate,
+        .reg_memory = RegMemory{
+            .reg1 = reg,
+            .reg_only = true,
+        },
+        .operands_mode = OperandsMode.ImmediateToRegMemory,
+    };
+}
+
+// ADD/SUB/CMP Immediate to register/memory.
+fn decodeArithmeticImmediate(bytes: []u8, ip: *usize) Instruction {
+    const byte1 = bytes[ip.*];
+    const byte2 = bytes[ip.* + 1];
+    const w = (byte1 & 1) == 1;
+    const s = (byte1 & 0b10) == 0b10;
+    const mod = (byte2 >> 6) & 0b11;
+    const rm = byte2 & 7;
+
+    ip.* += 2;
+
+    const reg_memory = getRegMemory(rm, mod, w, bytes, ip);
+
+    var immediate: u16 = undefined;
+    if (!s and w) {
+        immediate = readU16(bytes, ip.*);
+        ip.* += 2;
     } else {
-        val = state.bytes[state.i];
-        state.i += 1;
+        immediate = bytes[ip.*];
+        ip.* += 1;
     }
 
-    const op_part = (secondb & 0x38) >> 3;
+    const op_part = (byte2 & 0b00111000) >> 3;
     const opcode =
         if (op_part == 0b101) Opcode.SUB else if (op_part == 0b111) Opcode.CMP else Opcode.ADD;
 
-    try state.out.print("{s} {s}, {d}\n", .{ opcodeToString(opcode), eaModeToString(eaMode, &state.strbuf, !eaMode.reg_only), val });
+    return Instruction{
+        .opcode = opcode,
+        .reg_memory = reg_memory,
+        .immediate = immediate,
+        .operands_mode = OperandsMode.ImmediateToRegMemory,
+    };
 }
 
-fn decodeRegMemInstruction(opcode: Opcode, state: *DecoderState) !void {
-    const firstb = state.bytes[state.i];
-    const secondb = state.bytes[state.i + 1];
-    const wide = (firstb & 1) == 1;
-    const d = (firstb >> 1) & 1;
-    const mod = (secondb >> 6) & 3;
-    const reg_raw = (secondb >> 3) & 7;
-    const rm = secondb & 7;
+// ADD/SUB/CMP Immediate to accumulator register.
+fn decodeArithmeticImmediateToAccum(opcode: Opcode, bytes: []u8, ip: *usize) Instruction {
+    const byte1 = bytes[ip.*];
+    const w = (byte1 & 1) == 1;
 
-    const reg = chooseReg(reg_raw, wide);
-    var eaMode = getEAMode(rm, mod, wide);
-    if (eaMode.is_disp8) {
-        // get 1 byte
-        eaMode.disp8 = state.bytes[state.i + 2];
-        state.i += 3;
-    } else if (eaMode.is_disp16) {
-        // get 2 bytes.
-        eaMode.disp16 = (@as(u16, state.bytes[state.i + 3]) << 8) | state.bytes[state.i + 2];
-        state.i += 4;
+    ip.* += 1;
+
+    var immediate: u16 = undefined;
+    var reg: Reg = undefined;
+    if (w) {
+        immediate = readU16(bytes, ip.*);
+        ip.* += 2;
+        reg = Reg.AX;
     } else {
-        // increment by 2.
-        state.i += 2;
+        immediate = bytes[ip.*];
+        ip.* += 1;
+        reg = Reg.AL;
     }
 
-    if (d == 0) {
-        try state.out.print("{s} {s}, {s}\n", .{ opcodeToString(opcode), eaModeToString(eaMode, &state.strbuf, false), regToString(reg) });
-    } else {
-        try state.out.print("{s} {s}, {s}\n", .{ opcodeToString(opcode), regToString(reg), eaModeToString(eaMode, &state.strbuf, false) });
+    return Instruction{
+        .opcode = opcode,
+        .immediate = immediate,
+        .reg_memory = RegMemory{
+            .reg1 = reg,
+            .reg_only = true,
+        },
+        .operands_mode = OperandsMode.ImmediateToRegMemory,
+    };
+}
+
+fn decodeJump(opcode: Opcode, bytes: []u8, ip: *usize) Instruction {
+    const realval = bytes[ip.* + 1];
+    var ipinc: i8 = @bitCast(realval);
+    ipinc += 2;
+    ip.* += 2;
+
+    return Instruction {
+        .opcode = opcode,
+        .ip_increment = ipinc,
+        .operands_mode = OperandsMode.IpIncrement
+    };
+}
+
+fn getRegMemory(rm: u8, mod: u8, w: bool, bytes: []u8, ip: *usize) RegMemory {
+    var result: RegMemory = undefined;
+    if (mod == 0) {
+        result = switch (rm) {
+            0 => RegMemory{ .reg1 = Reg.BX, .reg2 = Reg.SI },
+            1 => RegMemory{ .reg1 = Reg.BX, .reg2 = Reg.DI },
+            2 => RegMemory{ .reg1 = Reg.BP, .reg2 = Reg.SI },
+            3 => RegMemory{ .reg1 = Reg.BP, .reg2 = Reg.DI },
+            4 => RegMemory{ .reg1 = Reg.SI },
+            5 => RegMemory{ .reg1 = Reg.DI },
+            6 => RegMemory{ .direct_address = true, .is_disp16 = w, .is_disp8 = !w },
+            7 => RegMemory{ .reg1 = Reg.BX },
+            else => @panic("Wrong rm for mod == 0"),
+        };
+        if (result.direct_address) {
+            if (w) {
+                result.disp = readU16(bytes, ip.*);
+                ip.* += 2;
+            } else {
+                result.disp = bytes[ip.*];
+                ip.* += 1;
+            }
+        }
+    } else if (mod == 1) {
+        result = switch (rm) {
+            0 => RegMemory{ .reg1 = Reg.BX, .reg2 = Reg.SI, .is_disp8 = true },
+            1 => RegMemory{ .reg1 = Reg.BX, .reg2 = Reg.DI, .is_disp8 = true },
+            2 => RegMemory{ .reg1 = Reg.BP, .reg2 = Reg.SI, .is_disp8 = true },
+            3 => RegMemory{ .reg1 = Reg.BP, .reg2 = Reg.DI, .is_disp8 = true },
+            4 => RegMemory{ .reg1 = Reg.SI, .is_disp8 = true },
+            5 => RegMemory{ .reg1 = Reg.DI, .is_disp8 = true },
+            6 => RegMemory{ .reg1 = Reg.BP, .is_disp8 = true },
+            7 => RegMemory{ .reg1 = Reg.BX, .is_disp8 = true },
+            else => @panic("Wrong rm for mod == 1"),
+        };
+        result.disp = bytes[ip.*];
+        ip.* += 1;
+    } else if (mod == 2) {
+        result = switch (rm) {
+            0 => RegMemory{ .reg1 = Reg.BX, .reg2 = Reg.SI, .is_disp16 = true },
+            1 => RegMemory{ .reg1 = Reg.BX, .reg2 = Reg.DI, .is_disp16 = true },
+            2 => RegMemory{ .reg1 = Reg.BP, .reg2 = Reg.SI, .is_disp16 = true },
+            3 => RegMemory{ .reg1 = Reg.BP, .reg2 = Reg.DI, .is_disp16 = true },
+            4 => RegMemory{ .reg1 = Reg.SI, .is_disp16 = true },
+            5 => RegMemory{ .reg1 = Reg.DI, .is_disp16 = true },
+            6 => RegMemory{ .reg1 = Reg.BP, .is_disp16 = true },
+            7 => RegMemory{ .reg1 = Reg.BX, .is_disp16 = true },
+            else => @panic("Wrong rm for mod == 2"),
+        };
+        result.disp = readU16(bytes, ip.*);
+        ip.* += 2;
+    } else if (mod == 3) {
+        if (w) {
+            result = switch (rm) {
+                0 => RegMemory{ .reg1 = Reg.AX, .reg_only = true },
+                1 => RegMemory{ .reg1 = Reg.CX, .reg_only = true },
+                2 => RegMemory{ .reg1 = Reg.DX, .reg_only = true },
+                3 => RegMemory{ .reg1 = Reg.BX, .reg_only = true },
+                4 => RegMemory{ .reg1 = Reg.SP, .reg_only = true },
+                5 => RegMemory{ .reg1 = Reg.BP, .reg_only = true },
+                6 => RegMemory{ .reg1 = Reg.SI, .reg_only = true },
+                7 => RegMemory{ .reg1 = Reg.DI, .reg_only = true },
+                else => @panic("wrong value provided for register"),
+            };
+        } else {
+            result = switch (rm) {
+                0 => RegMemory{ .reg1 = Reg.AL, .reg_only = true },
+                1 => RegMemory{ .reg1 = Reg.CL, .reg_only = true },
+                2 => RegMemory{ .reg1 = Reg.DL, .reg_only = true },
+                3 => RegMemory{ .reg1 = Reg.BL, .reg_only = true },
+                4 => RegMemory{ .reg1 = Reg.AH, .reg_only = true },
+                5 => RegMemory{ .reg1 = Reg.CH, .reg_only = true },
+                6 => RegMemory{ .reg1 = Reg.DH, .reg_only = true },
+                7 => RegMemory{ .reg1 = Reg.BH, .reg_only = true },
+                else => @panic("wrong value provided for register"),
+            };
+        }
     }
+    result.is_word = w;
+    return result;
+}
+
+fn readU16(bytes: []u8, ip: usize) u16 {
+    return (@as(u16, bytes[ip + 1]) << 8) | bytes[ip];
 }
 
 fn chooseReg(v: u8, wide: bool) Reg {
@@ -339,116 +462,33 @@ fn regToString(reg: Reg) []const u8 {
     };
 }
 
-fn simplyBufPrint(buf: []u8, comptime f: []const u8, args: anytype) []u8 {
-    if (fmt.bufPrint(buf, f, args)) |res| {
-        return res;
-    } else |_| {
-        @panic("Cannot print to buffer");
-    }
-}
-
-fn eaModeToString(mode: EAMode, buf: []u8, specify_width: bool) []u8 {
-    const width_specifier: []const u8 = if (!specify_width)
-        ""
-    else if (mode.is_word)
-        "word "
-    else
-        "byte ";
-
-    if (mode.direct_address) {
-        if (mode.is_disp16) {
-            return simplyBufPrint(buf, "{s}[{d}]", .{ width_specifier, mode.disp16 });
-        } else {
-            return simplyBufPrint(buf, "{s}[{d}]", .{ width_specifier, mode.disp8 });
-        }
-    } else if (mode.is_disp8) {
-        if (mode.reg2) |reg2| {
-            return simplyBufPrint(buf, "{s}[{s} + {s} + {d}]", .{ width_specifier, regToString(mode.reg1), regToString(reg2), mode.disp8 });
-        } else {
-            return simplyBufPrint(buf, "{s}[{s} + {d}]", .{ width_specifier, regToString(mode.reg1), mode.disp8 });
-        }
-    } else if (mode.is_disp16) {
-        if (mode.reg2) |reg2| {
-            return simplyBufPrint(buf, "{s}[{s} + {s} + {d}]", .{ width_specifier, regToString(mode.reg1), regToString(reg2), mode.disp16 });
-        } else {
-            return simplyBufPrint(buf, "{s}[{s} + {d}]", .{ width_specifier, regToString(mode.reg1), mode.disp8 });
-        }
-    } else if (mode.reg2) |reg2| {
-        return simplyBufPrint(buf, "{s}[{s} + {s}]", .{ width_specifier, regToString(mode.reg1), regToString(reg2) });
-    } else if (mode.reg_only) {
-        return simplyBufPrint(buf, "{s}", .{regToString(mode.reg1)});
-    } else {
-        return simplyBufPrint(buf, "{s}[{s}]", .{ width_specifier, regToString(mode.reg1) });
-    }
-
-    @panic("Unhandled case...");
-}
-
-fn getEAMode(rm: u8, mod: u8, wide: bool) EAMode {
-    var result: EAMode = undefined;
-    if (mod == 0) {
-        result = switch (rm) {
-            0 => EAMode{ .reg1 = Reg.BX, .reg2 = Reg.SI },
-            1 => EAMode{ .reg1 = Reg.BX, .reg2 = Reg.DI },
-            2 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.SI },
-            3 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.DI },
-            4 => EAMode{ .reg1 = Reg.SI },
-            5 => EAMode{ .reg1 = Reg.DI },
-            6 => EAMode{ .direct_address = true, .is_disp16 = wide, .is_disp8 = !wide },
-            7 => EAMode{ .reg1 = Reg.BX },
-            else => @panic("Wrong rm for mod == 0"),
-        };
-    } else if (mod == 1) {
-        result = switch (rm) {
-            0 => EAMode{ .reg1 = Reg.BX, .reg2 = Reg.SI, .is_disp8 = true },
-            1 => EAMode{ .reg1 = Reg.BX, .reg2 = Reg.DI, .is_disp8 = true },
-            2 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.SI, .is_disp8 = true },
-            3 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.DI, .is_disp8 = true },
-            4 => EAMode{ .reg1 = Reg.SI, .is_disp8 = true },
-            5 => EAMode{ .reg1 = Reg.DI, .is_disp8 = true },
-            6 => EAMode{ .reg1 = Reg.BP, .is_disp8 = true },
-            7 => EAMode{ .reg1 = Reg.BX, .is_disp8 = true },
-            else => @panic("Wrong rm for mod == 1"),
-        };
-    } else if (mod == 2) {
-        result = switch (rm) {
-            0 => EAMode{ .reg1 = Reg.BX, .reg2 = Reg.SI, .is_disp16 = true },
-            1 => EAMode{ .reg1 = Reg.BX, .reg2 = Reg.DI, .is_disp16 = true },
-            2 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.SI, .is_disp16 = true },
-            3 => EAMode{ .reg1 = Reg.BP, .reg2 = Reg.DI, .is_disp16 = true },
-            4 => EAMode{ .reg1 = Reg.SI, .is_disp16 = true },
-            5 => EAMode{ .reg1 = Reg.DI, .is_disp16 = true },
-            6 => EAMode{ .reg1 = Reg.BP, .is_disp16 = true },
-            7 => EAMode{ .reg1 = Reg.BX, .is_disp16 = true },
-            else => @panic("Wrong rm for mod == 2"),
-        };
-    } else if (mod == 3) {
-        if (wide) {
-            result = switch (rm) {
-                0 => EAMode{ .reg1 = Reg.AX, .reg_only = true },
-                1 => EAMode{ .reg1 = Reg.CX, .reg_only = true },
-                2 => EAMode{ .reg1 = Reg.DX, .reg_only = true },
-                3 => EAMode{ .reg1 = Reg.BX, .reg_only = true },
-                4 => EAMode{ .reg1 = Reg.SP, .reg_only = true },
-                5 => EAMode{ .reg1 = Reg.BP, .reg_only = true },
-                6 => EAMode{ .reg1 = Reg.SI, .reg_only = true },
-                7 => EAMode{ .reg1 = Reg.DI, .reg_only = true },
-                else => @panic("wrong value provided for register"),
-            };
-        } else {
-            result = switch (rm) {
-                0 => EAMode{ .reg1 = Reg.AL, .reg_only = true },
-                1 => EAMode{ .reg1 = Reg.CL, .reg_only = true },
-                2 => EAMode{ .reg1 = Reg.DL, .reg_only = true },
-                3 => EAMode{ .reg1 = Reg.BL, .reg_only = true },
-                4 => EAMode{ .reg1 = Reg.AH, .reg_only = true },
-                5 => EAMode{ .reg1 = Reg.CH, .reg_only = true },
-                6 => EAMode{ .reg1 = Reg.DH, .reg_only = true },
-                7 => EAMode{ .reg1 = Reg.BH, .reg_only = true },
-                else => @panic("wrong value provided for register"),
-            };
-        }
-    }
-    result.is_word = wide;
-    return result;
+fn opcodeToString(opcode: Opcode) []const u8 {
+    return switch (opcode) {
+        Opcode.MOV => "mov",
+        Opcode.ADD => "add",
+        Opcode.SUB => "sub",
+        Opcode.CMP => "cmp",
+        Opcode.JA => "ja",
+        Opcode.JB => "jb",
+        Opcode.JBE => "jbe",
+        Opcode.JCXZ => "jcxz",
+        Opcode.JE => "je",
+        Opcode.JG => "jg",
+        Opcode.JL => "jl",
+        Opcode.JLE => "jle",
+        Opcode.JNB => "jnb",
+        Opcode.JNE => "jne",
+        Opcode.JNL => "jnl",
+        Opcode.JNO => "jno",
+        Opcode.JNP => "jnp",
+        Opcode.JNS => "jns",
+        Opcode.JO => "jo",
+        Opcode.JP => "jp",
+        Opcode.JS => "js",
+        Opcode.JZ => "jz",
+        Opcode.JNZ => "jnz",
+        Opcode.LOOP => "loop",
+        Opcode.LOOPNZ => "loopnz",
+        Opcode.LOOPZ => "loopz",
+    };
 }
