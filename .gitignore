@@ -2,3 +2,5 @@ files/
 *.exe
 *.obj
 *.pdb
+*.log
+.gdb_history
