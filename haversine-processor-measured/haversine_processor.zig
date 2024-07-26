@@ -93,6 +93,90 @@ const TimerData = struct {
     }
 };
 
+const NameTimer2 = struct {
+    start_time: u64 = 0,
+    children_exclude_time: u64 = 0,
+    elapsed: u64 = 0,
+};
+
+const ProfilerData = struct {
+    cpu_frequency: u64 = 0,
+    timers: [4096]NameTimer2 = undefined,
+    stack: [4096]*NameTimer2 = undefined,
+    stack_index: usize = 0,
+    zone_names: []const []const u8 = undefined,
+    timers_count: usize = 0,
+
+    fn init(self: *ProfilerData, zone_names: []const []const u8) void {
+        self.cpu_frequency = getCPUFrequency(100);
+        self.zone_names = zone_names;
+        self.timers_count = zone_names.len;
+    }
+
+    fn startZone(self: *ProfilerData, zone: anytype) void {
+        const index = @intFromEnum(zone);
+        self.timers[index].start_time = readTimeStamp();
+        self.stack_index += 1;
+        self.stack[self.stack_index - 1] = &self.timers[index];
+    }
+
+    fn endZone(self: *ProfilerData) void {
+        if (self.stack_index < 1) @panic("endZone before any zone is started");
+
+        const start_time = self.stack[self.stack_index - 1].start_time;
+        const end_time = readTimeStamp();
+        const elapsed = end_time - start_time;
+
+        if (self.stack_index > 1) {
+            self.stack[self.stack_index - 2].children_exclude_time += elapsed;
+        }
+
+        self.stack[self.stack_index - 1].elapsed += elapsed;
+        self.stack[self.stack_index - 1].start_time = 0;
+        self.stack_index -= 1;
+    }
+
+    fn printResults(self: *ProfilerData, out: std.fs.File.Writer) !void {
+        var total: u64 = 0;
+        for (self.timers, 0..self.timers_count) |value, _| {
+            total += value.elapsed - value.children_exclude_time;
+        }
+
+        const ms_elapsed = total * 1000 / self.cpu_frequency;
+        const minutes = @divTrunc(ms_elapsed, std.time.ms_per_min);
+        const seconds = (ms_elapsed % std.time.ms_per_min) / std.time.ms_per_s;
+        const ms = (ms_elapsed % std.time.ms_per_s);
+
+        try out.print("Total time: ~{d}:{d}.{d} ({d} ticks, {d} approximate frequency\n", .{ minutes, seconds, ms, total, self.cpu_frequency });
+        for (self.timers, 0..self.timers_count) |value, i| {
+            const zone_name = self.zone_names[i];
+            if (value.children_exclude_time == 0) {
+                const percents: f64 = @as(f64, @floatFromInt(value.elapsed)) * 100 / @as(f64, @floatFromInt(total));
+                try out.print("\t {d}. {s} -- {d} ticks, {d:.2}%\n", .{ i + 1, zone_name, value.elapsed, percents });
+            } else {
+                const without = value.elapsed - value.children_exclude_time;
+                const percents: f64 = @as(f64, @floatFromInt(without)) * 100 / @as(f64, @floatFromInt(total));
+                const percents_total: f64 = @as(f64, @floatFromInt(value.elapsed)) * 100 / @as(f64, @floatFromInt(total));
+                try out.print("\t {d}. {s} -- {d} ticks, {d:.2}% (w/ children {d} ticks, {d:.2}%)\n", .{ i + 1, zone_name, without, percents, value.elapsed, percents_total });
+            }
+        }
+    }
+};
+
+const TimerStep = enum {
+    readFile,
+    parsePoints,
+    computeHaversine,
+};
+
+const haversine_zone_names = [_][]const u8{
+    "Read file",
+    "Parse points",
+    "Compute haversine",
+};
+
+var haversine_profiler = ProfilerData{};
+
 const PointPair = struct {
     x0: f64 = 0,
     y0: f64 = 0,
@@ -339,25 +423,33 @@ pub fn main() !void {
         expected_result = try fmt.parseFloat(f64, bytes);
     }
 
+    haversine_profiler.init(&haversine_zone_names);
+
     timer.startTimer("Read file");
+    haversine_profiler.startZone(TimerStep.readFile);
     const file = try std.fs.cwd().openFile(args[1], .{});
     defer file.close();
     const bytes = try file.reader().readAllAlloc(gpa.backing_allocator, maxInt(i32));
     defer gpa.backing_allocator.free(bytes);
     try timer.endTimer();
+    haversine_profiler.endZone();
 
     timer.startTimer("Parse points");
+    haversine_profiler.startZone(TimerStep.parsePoints);
     const points = try readPoints(bytes, gpa.backing_allocator);
     defer points.deinit();
     try timer.endTimer();
+    haversine_profiler.endZone();
 
     timer.startTimer("Compute haversine for all points");
+    haversine_profiler.startZone(TimerStep.computeHaversine);
     var sum: f64 = 0;
     for (points.items) |pair| {
         sum += referenceHaversine(pair, 6372.8);
     }
     const avg_sum = sum / @as(f64, @floatFromInt(points.items.len));
     try timer.endTimer();
+    haversine_profiler.endZone();
 
     try stdout.print("Computed result: \t{d}\n", .{avg_sum});
     if (expected_result) |exp_res| {
@@ -369,5 +461,5 @@ pub fn main() !void {
         }
     }
 
-    try timer.printResults(stdout);
+    try haversine_profiler.printResults(stdout);
 }

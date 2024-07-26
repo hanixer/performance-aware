@@ -4,3 +4,11 @@ files/
 *.pdb
 *.log
 .gdb_history
+task03-add-sub-cmp/decoder
+task03-add-sub-cmp/decoder.o
+time-measurements/crossplatform_time_measurement
+time-measurements/crossplatform_time_measurement.o
+time-measurements/linux_time_measurement
+time-measurements/linux_time_measurement.o
+time-measurements/linux_time_measurement2
+time-measurements/linux_time_measurement2.o
