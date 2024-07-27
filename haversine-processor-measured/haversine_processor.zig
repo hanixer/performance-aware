@@ -33,114 +33,111 @@ fn getCPUFrequencyUnix(msToWait: u64) u64 {
     return cpuFreq;
 }
 
+fn getCPUFrequencyWindows(msToWait: u64) u64 {
+    const cpuStart = readTimeStamp();
+    var freq: i64 = 0;
+    _ = std.os.windows.ntdll.RtlQueryPerformanceFrequency(&freq);
+    var start: i64 = 0;
+    _ = std.os.windows.ntdll.RtlQueryPerformanceCounter(&start);
+
+    const freqToWait = @divTrunc(freq * @as(i64, @intCast(msToWait)), 1000);
+
+    var diff: i64 = 0;
+    var end: i64 = 0;
+    while (diff < freqToWait) {
+        _ = std.os.windows.ntdll.RtlQueryPerformanceCounter(&end);
+        diff = end - start;
+    }
+
+    const cpuEnd = readTimeStamp();
+    const cpuDiff = @divTrunc((cpuEnd - cpuStart) * 1000, msToWait);
+    return cpuDiff;
+}
+
 // Return estimation of number of clocks per second.
 fn getCPUFrequency(msToWait: u64) u64 {
     const os = builtin.os.tag;
     if (os == .windows) {
         // Use Windows API
         // Example: windows_function();
-        _ = std.os.windows.ntdll.NtClose(0);
-        return 0;
+        return getCPUFrequencyWindows(msToWait);
     } else {
         return getCPUFrequencyUnix(msToWait);
         // Handle other operating systems
     }
 }
 
-const NameTimer = struct {
-    name: []const u8,
-    elapsed: u64,
+const ProfilerAnchor = struct {
+    elapsed_total: u64 = 0,
+    elapsed_children: u64 = 0,
 };
 
-const TimerData = struct {
-    cpu_frequency: u64 = 0,
-    curr_name: []const u8 = "",
-    curr_start: u64 = 0,
-    timers: std.ArrayList(NameTimer),
-
-    fn init(self: *TimerData) void {
-        self.cpu_frequency = getCPUFrequency(100);
+const ProfilerZone = struct {
+    start_time: u64,
+    profiler: *ProfilerData,
+    anchor_index: usize,
+    parent_index: ?usize,
+    old_elapsed_total: u64 = 0,
+    fn endZone(self: *ProfilerZone) void {
+        self.profiler.endZone(self);
     }
-
-    fn startTimer(self: *TimerData, name: []const u8) void {
-        self.curr_start = readTimeStamp();
-        self.curr_name = name;
-    }
-
-    fn endTimer(self: *TimerData) !void {
-        const end = readTimeStamp();
-        var new_one = try self.timers.addOne();
-        new_one.name = self.curr_name;
-        new_one.elapsed = end - self.curr_start;
-    }
-
-    fn printResults(self: *TimerData, out: std.fs.File.Writer) !void {
-        var total: u64 = 0;
-        for (self.timers.items) |value| {
-            total += value.elapsed;
-        }
-
-        const ms_elapsed = total * 1000 / self.cpu_frequency;
-        const minutes = @divTrunc(ms_elapsed, std.time.ms_per_min);
-        const seconds = (ms_elapsed % std.time.ms_per_min) / std.time.ms_per_s;
-        const ms = (ms_elapsed % std.time.ms_per_s);
-
-        try out.print("Total time: ~{d}:{d}.{d} ({d} ticks, {d} approximate frequency\n", .{ minutes, seconds, ms, total, self.cpu_frequency });
-        for (self.timers.items, 0..) |value, i| {
-            const percents: f64 = @as(f64, @floatFromInt(value.elapsed)) * 100 / @as(f64, @floatFromInt(total));
-            try out.print("\t {d}. {s} -- {d} ticks, {d:.2}%\n", .{ i + 1, value.name, value.elapsed, percents });
-        }
-    }
-};
-
-const NameTimer2 = struct {
-    start_time: u64 = 0,
-    children_exclude_time: u64 = 0,
-    elapsed: u64 = 0,
 };
 
 const ProfilerData = struct {
     cpu_frequency: u64 = 0,
-    timers: [4096]NameTimer2 = undefined,
-    stack: [4096]*NameTimer2 = undefined,
-    stack_index: usize = 0,
-    zone_names: []const []const u8 = undefined,
-    timers_count: usize = 0,
+    anchors: [4096]ProfilerAnchor = undefined,
+    anchor_names: []const []const u8 = undefined,
+    anchors_count: usize = 0,
+    curr_anchor_index: ?usize = null,
+    profile_start: u64 = 0,
+    profile_end: u64 = 0,
 
-    fn init(self: *ProfilerData, zone_names: []const []const u8) void {
+    fn init(self: *ProfilerData, anchor_names: []const []const u8) void {
         self.cpu_frequency = getCPUFrequency(100);
-        self.zone_names = zone_names;
-        self.timers_count = zone_names.len;
+        self.anchor_names = anchor_names;
+        self.anchors_count = anchor_names.len;
     }
 
-    fn startZone(self: *ProfilerData, zone: anytype) void {
-        const index = @intFromEnum(zone);
-        self.timers[index].start_time = readTimeStamp();
-        self.stack_index += 1;
-        self.stack[self.stack_index - 1] = &self.timers[index];
+    fn startProfile(self: *ProfilerData) void {
+        self.profile_start = readTimeStamp();
     }
 
-    fn endZone(self: *ProfilerData) void {
-        if (self.stack_index < 1) @panic("endZone before any zone is started");
+    fn endProfile(self: *ProfilerData) void {
+        self.profile_end = readTimeStamp();
+    }
 
-        const start_time = self.stack[self.stack_index - 1].start_time;
+    fn startZone(self: *ProfilerData, anchor_id: anytype) ProfilerZone {
+        const index = @intFromEnum(anchor_id);
+
+        const parent_index = self.curr_anchor_index;
+        self.curr_anchor_index = index;
+
+        return ProfilerZone {
+            .start_time = readTimeStamp(),
+            .profiler = self,
+            .anchor_index = index,
+            .parent_index = parent_index,
+            .old_elapsed_total = self.anchors[index].elapsed_total,
+        };
+    }
+
+    fn endZone(self: *ProfilerData, zone: *ProfilerZone) void {
+        const start_time = zone.start_time;
         const end_time = readTimeStamp();
         const elapsed = end_time - start_time;
-
-        if (self.stack_index > 1) {
-            self.stack[self.stack_index - 2].children_exclude_time += elapsed;
+        const anchor = &self.anchors[zone.anchor_index];
+        
+        if (zone.parent_index) |parent_index| {
+            const parent = &self.anchors[parent_index];
+            parent.elapsed_children += elapsed;
         }
+        self.curr_anchor_index = zone.parent_index;
 
-        self.stack[self.stack_index - 1].elapsed += elapsed;
-        self.stack[self.stack_index - 1].start_time = 0;
-        self.stack_index -= 1;
+        anchor.elapsed_total = zone.old_elapsed_total + elapsed;
     }
 
     fn printResults(self: *ProfilerData, out: std.fs.File.Writer) !void {
-        var total: u64 = 0;
-        for (self.timers, 0..self.timers_count) |value, _| {
-            total += value.elapsed - value.children_exclude_time;
-        }
+        const total: u64 = self.profile_end - self.profile_start;
 
         const ms_elapsed = total * 1000 / self.cpu_frequency;
         const minutes = @divTrunc(ms_elapsed, std.time.ms_per_min);
@@ -148,17 +145,20 @@ const ProfilerData = struct {
         const ms = (ms_elapsed % std.time.ms_per_s);
 
         try out.print("Total time: ~{d}:{d}.{d} ({d} ticks, {d} approximate frequency\n", .{ minutes, seconds, ms, total, self.cpu_frequency });
-        for (self.timers, 0..self.timers_count) |value, i| {
-            const zone_name = self.zone_names[i];
-            if (value.children_exclude_time == 0) {
-                const percents: f64 = @as(f64, @floatFromInt(value.elapsed)) * 100 / @as(f64, @floatFromInt(total));
-                try out.print("\t {d}. {s} -- {d} ticks, {d:.2}%\n", .{ i + 1, zone_name, value.elapsed, percents });
-            } else {
-                const without = value.elapsed - value.children_exclude_time;
-                const percents: f64 = @as(f64, @floatFromInt(without)) * 100 / @as(f64, @floatFromInt(total));
-                const percents_total: f64 = @as(f64, @floatFromInt(value.elapsed)) * 100 / @as(f64, @floatFromInt(total));
-                try out.print("\t {d}. {s} -- {d} ticks, {d:.2}% (w/ children {d} ticks, {d:.2}%)\n", .{ i + 1, zone_name, without, percents, value.elapsed, percents_total });
+        var i: usize = 0;
+        while (i < self.anchors_count) {
+            const anchor = self.anchors[i];
+            const zone_name = self.anchor_names[i];
+            const elapsed_exclusive = anchor.elapsed_total - anchor.elapsed_children;
+            const elapsed_inclusive = anchor.elapsed_total;
+            const percents: f64 = @as(f64, @floatFromInt(elapsed_exclusive)) * 100 / @as(f64, @floatFromInt(total));
+            try out.print("\t {d}. {s} -- {d} ticks, {d:.2}%", .{ i + 1, zone_name, elapsed_exclusive, percents });
+            if (elapsed_exclusive != elapsed_inclusive) {
+                const percents_with_children = @as(f64, @floatFromInt(elapsed_inclusive)) * 100 / @as(f64, @floatFromInt(total));
+                try out.print(", w/ children {d} ticks, {d:.2}%", .{ elapsed_inclusive, percents_with_children });
             }
+            try out.print("\n", .{});
+            i += 1;
         }
     }
 };
@@ -166,12 +166,14 @@ const ProfilerData = struct {
 const TimerStep = enum {
     readFile,
     parsePoints,
+    parseFirstComponent,
     computeHaversine,
 };
 
-const haversine_zone_names = [_][]const u8{
+const haversine_anchor_names = [_][]const u8{
     "Read file",
     "Parse points",
+    "Parse first component",
     "Compute haversine",
 };
 
@@ -296,6 +298,7 @@ fn readPoint(data: *ParseData) ParseError!PointPair {
 
     var pair = PointPair{};
 
+    var first_zone = haversine_profiler.startZone(TimerStep.parseFirstComponent);
     pair.x0 = try readPointComponent(data, "x0");
     skipWhitespaces(data);
     if (!consumeChar(data, ',')) {
@@ -309,6 +312,7 @@ fn readPoint(data: *ParseData) ParseError!PointPair {
         return ParseError.InvalidChar;
     }
     skipWhitespaces(data);
+    first_zone.endZone();
 
     pair.x1 = try readPointComponent(data, "x1");
     skipWhitespaces(data);
@@ -405,10 +409,6 @@ pub fn main() !void {
     const gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const args = try std.process.argsAlloc(gpa.backing_allocator);
     const stdout = std.io.getStdOut().writer();
-    const timers = std.ArrayList(NameTimer).init(gpa.backing_allocator);
-    var timer = TimerData{ .timers = timers };
-    timer.init();
-    defer timer.timers.deinit();
 
     if (args.len < 2) {
         try stdout.print("Usage:\n{s} [input.json] [result_check.f64]?\n", .{args[0]});
@@ -423,33 +423,27 @@ pub fn main() !void {
         expected_result = try fmt.parseFloat(f64, bytes);
     }
 
-    haversine_profiler.init(&haversine_zone_names);
-
-    timer.startTimer("Read file");
-    haversine_profiler.startZone(TimerStep.readFile);
+    haversine_profiler.init(&haversine_anchor_names);
+    haversine_profiler.startProfile();
+    var readFileZone = haversine_profiler.startZone(TimerStep.readFile);
     const file = try std.fs.cwd().openFile(args[1], .{});
     defer file.close();
     const bytes = try file.reader().readAllAlloc(gpa.backing_allocator, maxInt(i32));
     defer gpa.backing_allocator.free(bytes);
-    try timer.endTimer();
-    haversine_profiler.endZone();
+    readFileZone.endZone();
 
-    timer.startTimer("Parse points");
-    haversine_profiler.startZone(TimerStep.parsePoints);
+    var parse_points_zone = haversine_profiler.startZone(TimerStep.parsePoints);
     const points = try readPoints(bytes, gpa.backing_allocator);
     defer points.deinit();
-    try timer.endTimer();
-    haversine_profiler.endZone();
+    parse_points_zone.endZone();
 
-    timer.startTimer("Compute haversine for all points");
-    haversine_profiler.startZone(TimerStep.computeHaversine);
+    var compute_zone = haversine_profiler.startZone(TimerStep.computeHaversine);
     var sum: f64 = 0;
     for (points.items) |pair| {
         sum += referenceHaversine(pair, 6372.8);
     }
     const avg_sum = sum / @as(f64, @floatFromInt(points.items.len));
-    try timer.endTimer();
-    haversine_profiler.endZone();
+    compute_zone.endZone();
 
     try stdout.print("Computed result: \t{d}\n", .{avg_sum});
     if (expected_result) |exp_res| {
@@ -461,5 +455,6 @@ pub fn main() !void {
         }
     }
 
+    haversine_profiler.endProfile();
     try haversine_profiler.printResults(stdout);
 }
