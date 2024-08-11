@@ -181,7 +181,7 @@ const ProfilerData = struct {
                 const megabytes = @as(f64, @floatFromInt(anchor.processed_byte_count)) / (1024.0 * 1024.0);
                 const gigabytes = megabytes / 1024.0;
                 const gigabytes_per_second = @as(f64, @floatFromInt(self.cpu_frequency)) * gigabytes / @as(f64, @floatFromInt(elapsed_inclusive));
-                try out.print(" {d:.2} mb, {d:.2} gb/sec", .{megabytes, gigabytes_per_second});
+                try out.print(" {d:.2} mb, {d:.2} gb", .{megabytes, gigabytes_per_second});
             }
 
             try out.print("\n", .{});
